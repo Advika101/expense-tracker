@@ -13,8 +13,8 @@
     # Reduce referrer leakage on cross-origin navigations
     Referrer-Policy = "strict-origin-when-cross-origin"
 
-    # Disable unused browser APIs
-    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+    # Disable unused browser APIs; microphone=(self) enables voice dictation on our own origin.
+    Permissions-Policy = "camera=(), microphone=(self), geolocation=()"
 
     # Content Security Policy
     #

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -21,15 +21,18 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { CategoryIcon } from "@/components/categories/CategoryIcon";
 import { ExpenseFormData, Expense } from "@/types/expense";
-import { useCategories } from "@/hooks/useExpenseData";
+import { useCategories, useExpenses } from "@/hooks/useExpenseData";
 import {
   addExpense,
   updateExpense,
   getTagSuggestions,
   getDescriptionSuggestions,
 } from "@/db/expenseTrackerDb";
-import { CalendarIcon, Clock, Plus, X, ImagePlus, Trash2 } from "lucide-react";
+import { CalendarIcon, Clock, Plus, X, ImagePlus, Trash2, Mic } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { parseSpokenExpense } from "@/lib/parseSpokenExpense";
+import { buildHaystacks, guessCategory } from "@/lib/guessCategory";
+import { useSpeechToText } from "@/hooks/useSpeechToText";
 import { CategoryForm } from "@/components/categories/CategoryForm";
 import imageCompression from "browser-image-compression";
 import { toast } from "sonner";
@@ -85,6 +88,7 @@ function initDefaults(expense?: Expense, duplicate?: Expense): ExpenseFormData {
 
 export function ExpenseForm({ expense, duplicate, onSuccess, onCancel }: ExpenseFormProps) {
   const categories = useCategories();
+  const expenses = useExpenses();
   const [tagInput, setTagInput] = useState("");
   const [tagSuggestions, setTagSuggestions] = useState<string[]>([]);
   const [descriptionSuggestions, setDescriptionSuggestions] = useState<string[]>([]);
@@ -109,6 +113,45 @@ export function ExpenseForm({ expense, duplicate, onSuccess, onCancel }: Expense
 
   const tags = watch("tags");
   const description = watch("description");
+
+  // Precompute the searchable history once; rebuilds only when expenses change,
+  // not on every dictation.
+  const haystacks = useMemo(() => buildHaystacks(expenses), [expenses]);
+
+  // Stop auto-guessing once the user (or an edit/duplicate) has picked a category — respect the choice.
+  const categoryTouched = useRef(Boolean(expense || duplicate));
+
+  // Auto-guess the category from the description, for both typing and voice.
+  useEffect(() => {
+    if (categoryTouched.current || !description) return;
+    const guess = guessCategory(description, haystacks, categories);
+    if (guess) setValue("category", guess, { shouldValidate: true });
+  }, [description, haystacks, categories, setValue]);
+
+  // Voice entry: dictate "spent 300 on coffee" → fill amount + description; the effect above guesses the category.
+  const handleDictation = useCallback(
+    (transcript: string) => {
+      const parsed = parseSpokenExpense(transcript);
+      if (!parsed) {
+        toast.error(`Couldn't find an amount in "${transcript}"`);
+        return;
+      }
+      setValue("value", parsed.value, { shouldValidate: true });
+      if (parsed.description) {
+        categoryTouched.current = false; // fresh voice entry → let it re-guess
+        setValue("description", parsed.description);
+      }
+    },
+    [setValue],
+  );
+
+  const {
+    listening,
+    preparing,
+    start: startDictation,
+    stop: stopDictation,
+    supported: speechSupported,
+  } = useSpeechToText(handleDictation);
 
   // Load tag suggestions
   useEffect(() => {
@@ -196,6 +239,7 @@ export function ExpenseForm({ expense, duplicate, onSuccess, onCancel }: Expense
   };
 
   const handleCategoryCreated = (id: string) => {
+    categoryTouched.current = true;
     setValue("category", id);
     setShowCategoryDialog(false);
   };
@@ -213,6 +257,20 @@ export function ExpenseForm({ expense, duplicate, onSuccess, onCancel }: Expense
   return (
     <>
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
+        {/* Voice entry */}
+        {speechSupported && (
+          <Button
+            type="button"
+            variant="outline"
+            onClick={listening ? stopDictation : startDictation}
+            disabled={preparing}
+            className="w-full gap-2"
+          >
+            <Mic className={cn("h-4 w-4", listening && "animate-pulse text-red-500")} />
+            {preparing ? "Preparing…" : listening ? "Stop listening" : "Dictate expense"}
+          </Button>
+        )}
+
         {/* Value Input */}
         <div className="space-y-2">
           <Label htmlFor="value">Amount</Label>
@@ -242,7 +300,13 @@ export function ExpenseForm({ expense, duplicate, onSuccess, onCancel }: Expense
             control={control}
             name="category"
             render={({ field }) => (
-              <Select value={field.value} onValueChange={field.onChange}>
+              <Select
+                value={field.value}
+                onValueChange={(v) => {
+                  categoryTouched.current = true;
+                  field.onChange(v);
+                }}
+              >
                 <SelectTrigger>
                   <SelectValue placeholder="Select category">
                     {field.value && categories.find((c) => c.id === field.value) && (
